@@ -18,7 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<Student> Students => Set<Student>();
     public DbSet<Course> Courses => Set<Course>();
     public DbSet<Enrollment> Enrollments => Set<Enrollment>();
-
+    public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     protected override void OnConfiguring(
         DbContextOptionsBuilder optionsBuilder)
     {
@@ -142,5 +142,70 @@ public class AppDbContext : DbContext
             // No unique index on StudentId + CourseId.
             // A student may enroll in the same course multiple times.
         });
+
+    }
+    public override int SaveChanges()
+    {
+        var audits = CollectAudits();
+        var result = base.SaveChanges();
+        if (audits.Count > 0)
+        {
+            AuditLogs.AddRange(audits.Select(a => a.ToAuditLog()));
+            base.SaveChanges();
+        }
+        return result;
+    }
+
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        var audits = CollectAudits();
+        var result = await base.SaveChangesAsync(cancellationToken);
+        if (audits.Count > 0)
+        {
+            AuditLogs.AddRange(audits.Select(a => a.ToAuditLog()));
+            await base.SaveChangesAsync(cancellationToken);
+        }
+        return result;
+    }
+
+    private List<AuditEntry> CollectAudits()
+    {
+        ChangeTracker.DetectChanges();
+        var audits = new List<AuditEntry>();
+
+        foreach (var entry in ChangeTracker.Entries())
+        {
+            if (entry.Entity is AuditLog ||
+                entry.State is EntityState.Detached or EntityState.Unchanged)
+                continue;
+
+            var audit = new AuditEntry(entry)
+            {
+                EntityName = entry.Metadata.ShortName(),
+                Action = entry.State.ToString()
+            };
+            if (entry.State != EntityState.Added) audit.KeyText = audit.ComputeKey();
+
+            foreach (var prop in entry.Properties)
+            {
+                var name = prop.Metadata.Name;
+                switch (entry.State)
+                {
+                    case EntityState.Added when !prop.IsTemporary:
+                        audit.NewValues[name] = prop.CurrentValue;
+                        break;
+                    case EntityState.Deleted:
+                        audit.OldValues[name] = prop.OriginalValue;
+                        break;
+                    case EntityState.Modified when prop.IsModified:
+                        audit.OldValues[name] = prop.OriginalValue;
+                        audit.NewValues[name] = prop.CurrentValue;
+                        break;
+                }
+            }
+
+            if (audit.HasChanges) audits.Add(audit);
+        }
+        return audits;
     }
 }
